@@ -53,7 +53,7 @@ A full-stack web application for automated expense tracking and annual financial
 
 #### One-Command Setup
 ```bash
-git clone https://github.com/yourusername/personal-expense-tracker.git
+git clone https://github.com/ChadR23/Finacial
 cd personal-expense-tracker
 python setup.py
 ```
