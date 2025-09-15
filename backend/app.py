@@ -7,8 +7,8 @@ import tempfile
 import json
 from datetime import datetime
 import re
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, BaseDocTemplate, Frame, PageTemplate, NextPageTemplate
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
@@ -34,35 +34,118 @@ print("Backend starting - financial_data initialized:", financial_data)
 # Predefined categories
 CATEGORIES = [
     "Uncategorized",
+    "Processing",
+    "Bank Fees",
+    "Advertisement",
+    "Marketing",
+    "Repairs and Maintenance",
+    "EV/Gas",
     "Supplies",
     "Software",
     "Meals 50%",
+    "Shipping",
     "Travel",
-    "Bank Fees",
-    "Office Rent",
     "Utilities",
-    "Marketing",
+    "Office Rent",
     "Professional Services",
     "Equipment",
+    "Sales",
     "Insurance",
     "Other"
 ]
 
 # Rule-based categorization keywords
 CATEGORIZATION_RULES = {
-    "Software": ["google", "microsoft", "adobe", "slack", "zoom", "dropbox", "aws", "github"],
-    "Meals 50%": ["mcdonald", "starbucks", "restaurant", "cafe", "food", "dining"],
-    "Travel": ["uber", "lyft", "hotel", "airline", "gas", "fuel", "parking"],
+    # Payments/processors
+    "Processing": ["square", "stripe", "paypal"],
+    # Fees
     "Bank Fees": ["fee", "charge", "interest", "overdraft"],
-    "Supplies": ["office depot", "staples", "amazon", "supplies", "paper", "ink"],
+    # Advertising/marketing
+    "Advertisement": ["photo", "photohub", "printing", "ad", "advertisement"],
     "Marketing": ["facebook", "instagram", "google ads", "advertising", "marketing"],
+    # Repairs and maintenance
+    "Repairs and Maintenance": ["home depot", "lowe", "advance auto", "autozone", "autopart", "repair", "maintenance"],
+    # Fuel/charging
+    "EV/Gas": ["supercharging", "super charging", "gas station", "fuel"],
+    # Supplies
+    "Supplies": ["office depot", "staples", "ikea", "amazon", "supplies", "paper", "ink"],
+    # Software/SaaS
+    "Software": ["google svcs", "google", "microsoft", "adobe", "slack", "zoom", "dropbox", "aws", "github", "canva", "expens"],
+    # Meals
+    "Meals 50%": ["mcdonald", "starbucks", "chick-fil-a", "chipotle", "wendy", "burger king", "dunkin", "panera", "subway", "domino"],
+    # Shipping
+    "Shipping": ["ups store", "fedex", "usps", "shipping"],
+    # Travel
+    "Travel": ["uber", "lyft", "hotel", "airline", "parking"],
+    # Utilities
+    "Utilities": ["bge", "balt gas", "gas and electric", "utility", "utilities", "electric", "water", "verizon", "comcast"],
+    # Professional services
     "Professional Services": ["legal", "accounting", "consulting", "lawyer", "cpa"]
 }
 
-def categorize_transaction(description):
+# Vendor normalization rules to group similar vendor strings under one name
+VENDOR_NORMALIZATION_RULES = [
+    (re.compile(r"\bAFFIRM\b", re.IGNORECASE), "Affirm"),
+    (re.compile(r"\bGOO?GLE\b", re.IGNORECASE), "Google"),
+    (re.compile(r"\bGSUITE\b|\bWORKSPACE\b", re.IGNORECASE), "Google"),
+    (re.compile(r"\bPAY\s*PAL\b|\bPAYPAL\b", re.IGNORECASE), "PayPal"),
+    (re.compile(r"\bAMAZON\b", re.IGNORECASE), "Amazon"),
+    (re.compile(r"MCDONALD", re.IGNORECASE), "McDonald's"),
+    (re.compile(r"\bSTARBUCKS\b", re.IGNORECASE), "Starbucks"),
+    (re.compile(r"HOME\s*DEPOT", re.IGNORECASE), "The Home Depot"),
+    (re.compile(r"\bAPPLE\b|APPLE\.?COM|APPLECARD", re.IGNORECASE), "Apple"),
+    (re.compile(r"\bMICROSOFT\b|\bMSFT\b", re.IGNORECASE), "Microsoft"),
+    (re.compile(r"\bUBER\b", re.IGNORECASE), "Uber"),
+    (re.compile(r"\bLYFT\b", re.IGNORECASE), "Lyft"),
+]
+
+def normalize_vendor(description: str) -> str:
+    """Map noisy transaction descriptions to a normalized vendor name.
+    Uses explicit regex rules first, then a heuristic fallback.
+    """
+    if not description:
+        return "Unknown"
+    for pattern, name in VENDOR_NORMALIZATION_RULES:
+        if pattern.search(description):
+            return name
+    # Fallback: strip numbers/symbols and take first 2-3 words
+    cleaned = re.sub(r"[^A-Za-z\s]", "", description).strip()
+    if not cleaned:
+        return description
+    words = cleaned.split()
+    candidate = " ".join(words[:3]) if len(words) >= 3 else " ".join(words)
+    return candidate.title()
+
+def categorize_transaction(description, amount=None):
     """Auto-categorize transaction based on description keywords"""
     description_lower = description.lower()
-    
+    # Special high-priority logic (examples requested)
+    if "tesla" in description_lower:
+        if "super" in description_lower or "charge" in description_lower:
+            return "EV/Gas"
+        return "Repairs and Maintenance"
+    if "home depot" in description_lower:
+        return "Repairs and Maintenance"
+
+    # User-provided mapping rules
+    if "hdphotohub" in description_lower:
+        return "Software"
+    if "affirm" in description_lower:
+        return "Equipment"
+    if "amex" in description_lower:
+        return "Bank Fees"
+    if "square inc" in description_lower or description_lower.startswith("square ") or description_lower.startswith("sq *"):
+        # Positive amounts are sales; negatives back out to Uncategorized per request
+        if amount is not None and amount > 0:
+            return "Sales"
+        return "Uncategorized"
+    if "apple" in description_lower:
+        return "Software"
+    if "bk od amer" in description_lower:
+        return "Bank Fees"
+    if "cubicasa" in description_lower:
+        return "Software"
+
     for category, keywords in CATEGORIZATION_RULES.items():
         for keyword in keywords:
             if keyword in description_lower:
@@ -131,7 +214,7 @@ def extract_transactions_from_pdf(pdf_path):
                                                 continue
                                         
                                         # Auto-categorize
-                                        category = categorize_transaction(description)
+                                        category = categorize_transaction(description, amount)
                                         
                                         transaction = {
                                             "date": date_obj.isoformat(),
@@ -192,7 +275,7 @@ def extract_transactions_from_pdf(pdf_path):
                                         except ValueError:
                                             print(f"Could not parse date: {date_str}")
                                             continue
-                                    category = categorize_transaction(description)
+                                    category = categorize_transaction(description, amount)
                                     
                                     transaction = {
                                         "date": date_obj.isoformat(),
@@ -490,42 +573,64 @@ def export_pdf(year):
     print(f"Export PDF requested for year: {year}")
     print(f"Available years in financial_data: {list(financial_data.keys())}")
     
-    if year not in financial_data:
-        print(f"Year {year} not found in financial_data")
-        return jsonify({'error': f'No data available for year {year}. Available years: {list(financial_data.keys())}'}), 400
-    
-    # Collect all transactions for the year
+    # Collect all transactions for the year (gracefully handle missing year)
     all_transactions = []
-    print(f"Months available for {year}: {list(financial_data[year].keys())}")
-    
-    for month, month_data in financial_data[year].items():
-        month_transactions = month_data['transactions']
-        print(f"Month {month}: {len(month_transactions)} transactions")
-        all_transactions.extend(month_transactions)
+    if year in financial_data:
+        print(f"Months available for {year}: {list(financial_data[year].keys())}")
+        for month, month_data in financial_data[year].items():
+            month_transactions = month_data['transactions']
+            print(f"Month {month}: {len(month_transactions)} transactions")
+            all_transactions.extend(month_transactions)
+    else:
+        print(f"Year {year} not found in financial_data - generating empty summary PDF")
     
     print(f"Total transactions for {year}: {len(all_transactions)}")
     
-    if not all_transactions:
-        return jsonify({'error': f'No transactions to export for year {year}'}), 400
-    
     try:
         # Calculate summary data
-        df = pd.DataFrame(all_transactions)
-        df['amount'] = pd.to_numeric(df['amount'])
+        # Build DataFrame even if empty
+        if all_transactions:
+            df = pd.DataFrame(all_transactions)
+        else:
+            df = pd.DataFrame(columns=['date', 'description', 'amount', 'category'])
+        if 'amount' in df.columns:
+            df['amount'] = pd.to_numeric(df['amount'])
+        else:
+            df['amount'] = pd.Series(dtype=float)
         
-        total_income = df[df['amount'] > 0]['amount'].sum()
-        total_expenses = abs(df[df['amount'] < 0]['amount'].sum())
+        total_income = df[df['amount'] > 0]['amount'].sum() if not df.empty else 0.0
+        total_expenses = abs(df[df['amount'] < 0]['amount'].sum()) if not df.empty else 0.0
         
-        expense_df = df[df['amount'] < 0].copy()
-        expense_df['amount'] = abs(expense_df['amount'])
-        category_totals = expense_df.groupby('category')['amount'].sum().to_dict()
+        expense_df = df[df['amount'] < 0].copy() if not df.empty else pd.DataFrame(columns=['date','description','amount','category'])
+        if not expense_df.empty:
+            expense_df['amount'] = abs(expense_df['amount'])
+            category_totals = expense_df.groupby('category')['amount'].sum().to_dict()
+        else:
+            category_totals = {}
         
         # Create temporary file for PDF
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_file.close()
         
-        # Create PDF document
-        doc = SimpleDocTemplate(temp_file.name, pagesize=letter)
+        # Create PDF document with multiple page templates (portrait for page 1, landscape for matrix pages)
+        doc = BaseDocTemplate(
+            temp_file.name,
+            pagesize=letter,
+            leftMargin=0.5*inch,
+            rightMargin=0.5*inch,
+            topMargin=0.5*inch,
+            bottomMargin=0.5*inch
+        )
+        # Portrait template (first page)
+        portrait_frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='portrait_frame')
+        portrait_template = PageTemplate(id='Portrait', frames=[portrait_frame], pagesize=letter)
+        # Landscape template (for transactions matrix)
+        landscape_size = landscape(letter)
+        landscape_width = landscape_size[0] - doc.leftMargin - doc.rightMargin
+        landscape_height = landscape_size[1] - doc.topMargin - doc.bottomMargin
+        landscape_frame = Frame(doc.leftMargin, doc.bottomMargin, landscape_width, landscape_height, id='landscape_frame')
+        landscape_template = PageTemplate(id='Landscape', frames=[landscape_frame], pagesize=landscape_size)
+        doc.addPageTemplates([portrait_template, landscape_template])
         styles = getSampleStyleSheet()
         story = []
         
@@ -544,9 +649,11 @@ def export_pdf(year):
         if all_transactions:
             dates = [datetime.fromisoformat(t['date']) for t in all_transactions]
             date_range = f"Period: {min(dates).strftime('%B %d, %Y')} - {max(dates).strftime('%B %d, %Y')}"
-            date_para = Paragraph(date_range, styles['Normal'])
-            story.append(date_para)
-            story.append(Spacer(1, 20))
+        else:
+            date_range = "Period: No transactions available"
+        date_para = Paragraph(date_range, styles['Normal'])
+        story.append(date_para)
+        story.append(Spacer(1, 20))
         
         # Summary statistics
         summary_data = [
@@ -606,7 +713,91 @@ def export_pdf(year):
         else:
             no_data = Paragraph("No expense data available", styles['Normal'])
             story.append(no_data)
-        
+
+        # Switch to landscape for matrix pages
+        story.append(NextPageTemplate('Landscape'))
+        story.append(PageBreak())
+        matrix_header = Paragraph("Expenses by Vendor/Category Across Months", styles['Heading2'])
+        story.append(matrix_header)
+        story.append(Spacer(1, 12))
+
+        # Prepare month labels and ordering
+        month_numbers = [f"{i:02d}" for i in range(1, 13)]
+        month_labels = [
+            'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+            'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+        ]
+
+        # Build expense-only dataframe with month column
+        if not expense_df.empty:
+            expense_df = expense_df.copy()
+            expense_df['amount'] = pd.to_numeric(expense_df['amount'])
+            # original df had negative for expenses; we converted to positive above
+            # Ensure month is extracted correctly from ISO date
+            expense_df['month'] = expense_df['date'].apply(lambda d: d[5:7])
+
+            # Normalize vendor names to group similar strings
+            pivot_source = expense_df.copy()
+            pivot_source['vendor'] = pivot_source['description'].apply(normalize_vendor)
+            pivot = pivot_source.pivot_table(
+                index='vendor',
+                columns='month',
+                values='amount',
+                aggfunc='sum',
+                fill_value=0.0
+            )
+
+            # Ensure all months present in columns in correct order
+            for m in month_numbers:
+                if m not in pivot.columns:
+                    pivot[m] = 0.0
+            pivot = pivot[month_numbers]
+
+            # Sort rows by total descending
+            pivot['__row_total__'] = pivot.sum(axis=1)
+            pivot = pivot.sort_values('__row_total__', ascending=False)
+
+            # Build table data (wrap long descriptions)
+            table_data = [["Expenses"] + month_labels]
+            for desc, row in pivot.drop(columns='__row_total__').iterrows():
+                row_values = [
+                    (f"${val:,.2f}" if abs(val) > 0.004 else '-')
+                    for val in row.tolist()
+                ]
+                desc_para = Paragraph(str(desc), styles['Normal'])
+                table_data.append([desc_para] + row_values)
+
+            # Bottom totals per month
+            monthly_totals = [pivot.drop(columns='__row_total__')[m].sum() for m in month_numbers]
+            total_row = ["Total Cash Out"] + [f"${v:,.2f}" if v else '-' for v in monthly_totals]
+            table_data.append(total_row)
+
+            # Compute dynamic column widths to fit page width (wider in landscape)
+            available_width = landscape_width
+            # Make Expense column smaller so month columns are wider
+            first_col_width = min(max(2.4*inch, available_width * 0.27), 3.6*inch)
+            month_col_width = (available_width - first_col_width) / 12.0
+            col_widths = [first_col_width] + [month_col_width] * 12
+            matrix_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+            matrix_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 11),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('ALIGN', (1, 0), (-1, 0), 'CENTER'),
+                ('ALIGN', (1, 1), (-1, -2), 'CENTER'),
+                ('ALIGN', (1, -1), (-1, -1), 'CENTER'),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
+                ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            story.append(matrix_table)
+        else:
+            story.append(Paragraph("No expense transactions found for the year.", styles['Normal']))
+
         # Build PDF
         doc.build(story)
         

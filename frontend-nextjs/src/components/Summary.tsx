@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Download, TrendingUp, TrendingDown, DollarSign, FileText } from 'lucide-react';
+import { Download, TrendingUp, TrendingDown, DollarSign, FileText, Edit3, ChevronDown, ChevronUp } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { apiClient, SummaryData, Transaction } from '@/lib/api';
 
@@ -14,10 +14,16 @@ export default function Summary({ transactions, selectedYear }: SummaryProps) {
   const [summaryData, setSummaryData] = useState<SummaryData | null>(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [months, setMonths] = useState<string[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [openMonths, setOpenMonths] = useState<Record<string, boolean>>({});
+  const [monthTransactions, setMonthTransactions] = useState<Record<string, Transaction[]>>({});
+  const [loadingMonth, setLoadingMonth] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (selectedYear) {
       fetchSummary();
+      fetchMonthsAndCategories();
     }
   }, [selectedYear]);
 
@@ -64,6 +70,56 @@ export default function Summary({ transactions, selectedYear }: SummaryProps) {
       alert(`PDF Export Error: ${errorMessage}`);
     } finally {
       setExporting(false);
+    }
+  };
+
+  const fetchMonthsAndCategories = async () => {
+    try {
+      const [monthsData, categoriesData] = await Promise.all([
+        apiClient.getMonths(selectedYear),
+        apiClient.getCategories(),
+      ]);
+      setMonths(monthsData);
+      setCategories(categoriesData);
+    } catch (error) {
+      console.error('Error fetching months/categories:', error);
+    }
+  };
+
+  const fetchMonthTransactions = async (month: string) => {
+    setLoadingMonth(prev => ({ ...prev, [month]: true }));
+    try {
+      const data = await apiClient.getTransactionsByMonth(selectedYear, month);
+      setMonthTransactions(prev => ({ ...prev, [month]: data.transactions }));
+    } catch (error) {
+      console.error('Error fetching month transactions:', error);
+    } finally {
+      setLoadingMonth(prev => ({ ...prev, [month]: false }));
+    }
+  };
+
+  const handleToggleMonth = (month: string) => {
+    const willOpen = !openMonths[month];
+    setOpenMonths(prev => ({ ...prev, [month]: willOpen }));
+    if (willOpen && !monthTransactions[month]) {
+      fetchMonthTransactions(month);
+    }
+  };
+
+  const handleCategoryChange = async (month: string, transactionId: string, newCategory: string) => {
+    setLoadingMonth(prev => ({ ...prev, [month]: true }));
+    try {
+      const updated = await apiClient.updateTransaction(selectedYear, month, transactionId, { category: newCategory });
+      setMonthTransactions(prev => ({
+        ...prev,
+        [month]: (prev[month] || []).map(t => t.id === transactionId ? updated : t),
+      }));
+      // Refresh summary to reflect new category totals
+      fetchSummary();
+    } catch (error) {
+      console.error('Error updating transaction category:', error);
+    } finally {
+      setLoadingMonth(prev => ({ ...prev, [month]: false }));
     }
   };
 
@@ -327,6 +383,82 @@ export default function Summary({ transactions, selectedYear }: SummaryProps) {
               Generate a professional PDF report for your tax preparer with all expense categories and totals.
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* Transactions by Month */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Transactions by Month</h3>
+        {months.length === 0 && (
+          <div className="text-sm text-gray-500">No months available.</div>
+        )}
+        <div className="divide-y divide-gray-200">
+          {months.map((month) => {
+            const isOpen = !!openMonths[month];
+            const list = monthTransactions[month] || [];
+            const monthName = new Date(parseInt(selectedYear), parseInt(month) - 1).toLocaleDateString('en-US', { month: 'long' });
+            return (
+              <div key={month}>
+                <button
+                  onClick={() => handleToggleMonth(month)}
+                  className="w-full flex items-center justify-between py-3"
+                >
+                  <span className="text-sm font-medium text-gray-900">{monthName} {selectedYear}</span>
+                  {isOpen ? <ChevronUp className="h-4 w-4 text-gray-500" /> : <ChevronDown className="h-4 w-4 text-gray-500" />}
+                </button>
+                {isOpen && (
+                  <div className="pb-4">
+                    {loadingMonth[month] && (
+                      <div className="text-sm text-gray-500 py-2">Loading transactions...</div>
+                    )}
+                    {!loadingMonth[month] && list.length === 0 && (
+                      <div className="text-sm text-gray-500 py-2">No transactions for this month.</div>
+                    )}
+                    {!loadingMonth[month] && list.length > 0 && (
+                      <div className="space-y-2">
+                        {list
+                          .slice()
+                          .sort((a, b) => new Date(a.date + 'T00:00:00').getTime() - new Date(b.date + 'T00:00:00').getTime())
+                          .map((t) => (
+                          <div key={t.id} className="border border-gray-200 rounded-lg p-3">
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center space-x-2 mb-1">
+                                  <span className="text-xs font-medium text-gray-900">
+                                    {new Date(t.date + 'T00:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })}
+                                  </span>
+                                  <span className={`text-xs font-bold ${t.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                    {formatCurrency(t.amount)}
+                                  </span>
+                                </div>
+                                <p className="text-sm text-gray-700 truncate">{t.description}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2 mt-2">
+                              <Edit3 className="h-4 w-4 text-gray-400" />
+                              <select
+                                value={t.category}
+                                onChange={(e) => handleCategoryChange(month, t.id, e.target.value)}
+                                disabled={!!loadingMonth[month]}
+                                className="flex-1 text-sm border border-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              >
+                                {categories.map((c) => (
+                                  <option key={c} value={c}>{c}</option>
+                                ))}
+                              </select>
+                              <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                {t.category}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

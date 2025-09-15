@@ -429,7 +429,11 @@ export default function TransactionViewer({
               .map((transaction) => (
               <div
                 key={transaction.id}
-                className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                className={`border rounded-lg p-4 transition-colors ${
+                  transaction.category === 'Uncategorized'
+                    ? 'bg-blue-50 border-blue-200 hover:bg-blue-100'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1 min-w-0">
