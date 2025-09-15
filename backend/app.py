@@ -50,6 +50,7 @@ CATEGORIES = [
     "Professional Services",
     "Equipment",
     "Sales",
+    "Interest",
     "Insurance",
     "Other"
 ]
@@ -645,12 +646,13 @@ def export_pdf(year):
         title = Paragraph(f"Business Expense Summary - {year}", title_style)
         story.append(title)
         
-        # Date range
-        if all_transactions:
-            dates = [datetime.fromisoformat(t['date']) for t in all_transactions]
-            date_range = f"Period: {min(dates).strftime('%B %d, %Y')} - {max(dates).strftime('%B %d, %Y')}"
-        else:
-            date_range = "Period: No transactions available"
+        # Date range (always show entire selected year Jan–Dec)
+        try:
+            start_label = datetime(int(year), 1, 1).strftime('%B %Y')
+            end_label = datetime(int(year), 12, 1).strftime('%B %Y')
+            date_range = f"Period: {start_label} - {end_label}"
+        except Exception:
+            date_range = f"Period: {year}"
         date_para = Paragraph(date_range, styles['Normal'])
         story.append(date_para)
         story.append(Spacer(1, 20))
@@ -659,7 +661,6 @@ def export_pdf(year):
         summary_data = [
             ['Total Income', f"${total_income:,.2f}"],
             ['Total Expenses', f"${total_expenses:,.2f}"],
-            ['Net Income', f"${total_income - total_expenses:,.2f}"],
             ['Total Transactions', str(len(all_transactions))]
         ]
         
@@ -687,21 +688,18 @@ def export_pdf(year):
             # Sort categories by amount (descending)
             sorted_categories = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
             
-            category_data = [['Category', 'Amount', 'Percentage']]
+            # Two-column table without percentages, plus Sum row
+            category_data = [['Category', 'Amount']]
             for category, amount in sorted_categories:
-                percentage = (amount / total_expenses * 100) if total_expenses > 0 else 0
-                category_data.append([
-                    category,
-                    f"${amount:,.2f}",
-                    f"{percentage:.1f}%"
-                ])
+                category_data.append([category, f"${amount:,.2f}"])
+            category_data.append(['Total', f"${total_expenses:,.2f}"])
             
-            category_table = Table(category_data, colWidths=[2.5*inch, 1.5*inch, 1*inch])
+            category_table = Table(category_data, colWidths=[3.0*inch, 2.0*inch])
             category_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                 ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+                ('ALIGN', (1, 1), (1, -1), 'RIGHT'),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
                 ('FONTSIZE', (0, 0), (-1, 0), 10),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
@@ -710,6 +708,33 @@ def export_pdf(year):
             ]))
             
             story.append(category_table)
+            story.append(Spacer(1, 16))
+
+            # Income vs Deductions summary
+            meals_amount = float(category_totals.get('Meals 50%', 0.0))
+            meals_adjustment = meals_amount * 0.5
+            deductions_adjusted = float(total_expenses) - meals_adjustment
+            income_summary = float(total_income)
+            profit = income_summary - deductions_adjusted
+
+            summary_rows = [
+                ['Income', f"${income_summary:,.2f}"],
+                ['Deductions (ADJ for meals)', f"${deductions_adjusted:,.2f}"],
+                ['', ''],
+                ['Profit', f"${profit:,.2f}"]
+            ]
+
+            summary_table = Table(summary_rows, colWidths=[3.0*inch, 2.0*inch])
+            summary_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+                ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+                ('LINEABOVE', (0, 1), (-1, 1), 0.5, colors.black),
+                ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(summary_table)
         else:
             no_data = Paragraph("No expense data available", styles['Normal'])
             story.append(no_data)
@@ -797,6 +822,75 @@ def export_pdf(year):
             story.append(matrix_table)
         else:
             story.append(Paragraph("No expense transactions found for the year.", styles['Normal']))
+
+        # Income summary page (Landscape)
+        story.append(PageBreak())
+        income_header = Paragraph("Income Summary Across Months", styles['Heading2'])
+        story.append(income_header)
+        story.append(Spacer(1, 12))
+
+        # Compute monthly Sales and Interest sums (income >= 0 categories Sales/Interest)
+        # Prepare month ordering
+        month_numbers = [f"{i:02d}" for i in range(1, 13)]
+        month_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+        # Build monthly income components
+        monthly_sales = {m: 0.0 for m in month_numbers}
+        monthly_interest = {m: 0.0 for m in month_numbers}
+        monthly_expenses_total = {m: 0.0 for m in month_numbers}
+
+        if not df.empty:
+            df_copy = df.copy()
+            df_copy['month'] = df_copy['date'].apply(lambda d: d[5:7])
+            for m in month_numbers:
+                # Sales: category == 'Sales' (positive by rule), sum amounts
+                month_rows = df_copy[df_copy['month'] == m]
+                if not month_rows.empty:
+                    monthly_sales[m] = float(month_rows[month_rows['category'] == 'Sales']['amount'].sum())
+                    monthly_interest[m] = float(month_rows[month_rows['category'] == 'Interest']['amount'].sum())
+                    # Expenses total: negative amounts (absolute value)
+                    monthly_expenses_total[m] = float(abs(month_rows[month_rows['amount'] < 0]['amount'].sum()))
+
+        # Balance: previous month's (Sales + Interest - Expenses)
+        balance = {m: 0.0 for m in month_numbers}
+        prev_carry = 0.0
+        for idx, m in enumerate(month_numbers):
+            balance[m] = prev_carry
+            prev_carry = (monthly_sales[m] + monthly_interest[m] - monthly_expenses_total[m])
+
+        # Income row = Balance + Sales + Interest per month
+        income_total = {m: balance[m] + monthly_sales[m] + monthly_interest[m] for m in month_numbers}
+
+        # Build table data
+        income_table_data = [["", *month_labels]]
+        def fmt(v: float) -> str:
+            return f"${v:,.2f}" if abs(v) >= 0.005 else '-'
+
+        income_table_data.append(["Balance", *[fmt(balance[m]) for m in month_numbers]])
+        income_table_data.append(["Sales", *[fmt(monthly_sales[m]) for m in month_numbers]])
+        income_table_data.append(["Interest", *[fmt(monthly_interest[m]) for m in month_numbers]])
+        income_table_data.append(["Income", *[fmt(income_total[m]) for m in month_numbers]])
+
+        # Column widths similar to expenses matrix but with first column smaller
+        available_width = landscape_width
+        first_col_width = min(max(1.6*inch, available_width * 0.14), 2.2*inch)
+        month_col_width = (available_width - first_col_width) / 12.0
+        col_widths = [first_col_width] + [month_col_width] * 12
+        income_table = Table(income_table_data, colWidths=col_widths, repeatRows=1)
+        income_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        story.append(income_table)
 
         # Build PDF
         doc.build(story)
